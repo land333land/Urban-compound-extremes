@@ -1,0 +1,86 @@
+import os
+import pandas as pd
+import pymannkendall as mk
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+input_folder = 'C_days_eachcity'
+output_folder = 'D_trends_M-K_Slope'
+
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+columns_to_analyze = ['temp_above_90', 'humidity_above_90', 'humidity_below_10', 'temp_humidity_above_90', 'temp_above_90_humidity_below_10']
+
+columns_to_plot = ['temp_above_90', 'temp_humidity_above_90', 'temp_above_90_humidity_below_10']
+
+results = []
+
+for city_file in os.listdir(input_folder):
+    if city_file.endswith('.csv'):
+        city_name = city_file.replace('_days_above_below_percentiles.csv', '')
+        file_path = os.path.join(input_folder, city_file)
+
+        city_data = pd.read_csv(file_path)
+
+        city_results = []
+
+        for col in columns_to_analyze:
+            series = city_data[col].values
+            if len(series) < 2:
+                continue
+
+            mk_test = mk.original_test(series)
+            # 计算Sens' slope
+            sens_slope = mk.sens_slope(series)
+
+            city_results.append({
+                'City': city_name,
+                'Type': col,
+                'MK_Trend': mk_test.trend,
+                'MK_P-Value': mk_test.p,
+                'Sens_Slope': sens_slope.slope
+            })
+
+        results.extend(city_results)
+
+        plt.figure(figsize=(12, 8))
+        plt.title(f'{city_name} 趋势分析')
+        colors = ['blue', 'green', 'orange']
+        markers = ['o', 's', 'x']
+
+        for i, col in enumerate(columns_to_plot):
+            years = city_data['year'].values
+            values = city_data[col].values
+
+            plt.plot(years, values, marker=markers[i], linestyle='-', color=colors[i], label=f'{col} 天数')
+
+            z = np.polyfit(years, values, 1)
+            p = np.poly1d(z)
+            plt.plot(years, p(years), linestyle='--', color=colors[i], label=f'{col} 拟合线')
+
+            trend_result = [r for r in city_results if r['Type'] == col]
+            if trend_result:
+                trend = trend_result[0]['MK_Trend']
+                p_value = trend_result[0]['MK_P-Value']
+                slope = trend_result[0]['Sens_Slope']
+
+                trend_text = f'{col} 趋势: {trend}, p-value: {p_value:.2f}, Slope: {slope:.2f}'
+                plt.text(0.05, 0.95 - 0.05 * i, trend_text, transform=plt.gca().transAxes, fontsize=12,
+                         color=colors[i], verticalalignment='top')
+
+        plt.xlabel('Year')
+        plt.ylabel('Days')
+        plt.legend()
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+        image_path = os.path.join(output_folder, f'{city_name}_trend_analysis.png')
+        plt.savefig(image_path)
+        plt.close()
+
+result_df = pd.DataFrame(results)
+
+result_file_path = os.path.join(output_folder, 'a_results.xlsx')
+result_df.to_excel(result_file_path, index=False)
+

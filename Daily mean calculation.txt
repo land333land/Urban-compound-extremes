@@ -1,0 +1,93 @@
+import xarray as xr
+import pandas as pd
+import numpy as np
+import os
+import geopandas as gpd
+import rioxarray  # 用于处理CRS
+from shapely.geometry import mapping
+import re
+
+nc_data_folder = r'data/ERA5'
+output_data_folder = r'A_daily_mean_eachrural'
+shp_folder = r'SHP/all_rural'
+
+
+cities_gdf = gpd.GeoDataFrame()
+for zip_file in os.listdir(shp_folder):
+    if zip_file.endswith(".zip"):
+        city_name = zip_file.split(".")[0]
+        zip_path = os.path.join(shp_folder, zip_file)
+        gdf = gpd.read_file(f"zip://{zip_path}")
+        gdf = gdf.to_crs("EPSG:4326")
+        gdf['cityname'] = city_name
+        cities_gdf = pd.concat([cities_gdf, gdf], ignore_index=True)
+
+years = range(1981, 2024)
+for year in years:
+    nc_file = os.path.join(nc_data_folder, f'Daily_avg_air_temp_specific_humidity_{year}_cst.nc')
+    if not os.path.exists(nc_file):
+        print(f"a.")
+        continue
+
+    nc_data = xr.open_dataset(nc_file)
+
+    print(f"a: {nc_data['longitude'].min().values} - {nc_data['longitude'].max().values}")
+    print(f"a: {nc_data['latitude'].min().values} - {nc_data['latitude'].max().values}")
+
+    print(f"a: {np.diff(nc_data['longitude'].values).mean()}")
+    print(f"a: {np.diff(nc_data['latitude'].values).mean()}")
+
+    for _, city_row in cities_gdf.iterrows():
+        city_name = city_row['cityname']
+
+        city_name = re.sub(r'[\\/*?:"<>|\r\n]+', "", city_name)
+
+        geom = city_row.geometry
+
+        print(f"{city_name}：{geom.bounds}")
+
+        minx, miny, maxx, maxy = geom.bounds
+        buffer = 0.5  
+        minx -= buffer
+        maxx += buffer
+        miny -= buffer
+        maxy += buffer
+
+        nc_data_subset = nc_data.sel(
+            longitude=slice(minx, maxx),
+            latitude=slice(maxy, miny)  
+        )
+
+        lon_new = np.arange(minx, maxx, 0.01)
+        lat_new = np.arange(miny, maxy, 0.01)
+
+        nc_data_interp = nc_data_subset.interp(longitude=lon_new, latitude=lat_new, method="linear")
+
+        mask = xr.DataArray(np.ones_like(nc_data_interp['t2m'][0]), dims=["latitude", "longitude"],
+                            coords={"latitude": nc_data_interp['latitude'], "longitude": nc_data_interp['longitude']})
+        mask = mask.rio.write_crs("EPSG:4326")
+        mask = mask.rio.clip([mapping(geom)], cities_gdf.crs, drop=False)
+
+        print(f"{city_name}: {mask.notnull().sum().item()}")
+
+        if mask.notnull().sum().item() == 0:
+            print(f"{city_name} ")
+            continue
+        result_data = []
+
+        for date in nc_data_interp['time'].values:
+            avg_air_temp = nc_data_interp['t2m'].sel(time=date).where(mask.notnull()).mean(
+                dim=['latitude', 'longitude']).values
+            avg_specific_humidity = nc_data_interp['specific_humidity'].sel(time=date).where(mask.notnull()).mean(
+                dim=['latitude', 'longitude']).values
+
+            print(f"{city_name} 在 {pd.to_datetime(date)} 的平均温度: {avg_air_temp}, 比湿度: {avg_specific_humidity}")
+
+            result_data.append({
+                'date': pd.to_datetime(date),
+                'average_temperature': avg_air_temp,
+                'average_specific_humidity': avg_specific_humidity
+            })
+
+        result_df = pd.DataFrame(result_data)
+        output_csv = os.path.join(output_data_folder, f'{city_name}_air_temp_specific_humidity_1981_2023.csv')
